@@ -17,9 +17,15 @@
 
 #define Q1_BASE_SPEED           30
 #define Q1_START_IGNORE_TICKS   40
-#define Q1_LEFT_MOTOR_SCALE    135
-#define Q1_RIGHT_MOTOR_SCALE   100
+#define Q1_LEFT_MOTOR_SCALE    160
+#define Q1_RIGHT_MOTOR_SCALE    95
+#define Q1_LEFT_MOTOR_BIAS       8
+#define Q1_RIGHT_MOTOR_BIAS     -2
 #define Q1_SLEW_STEP             2
+#define Q1_ANGLE_KP           0.35f
+#define Q1_ANGLE_KI           0.01f
+#define Q1_ANGLE_KD           0.60f
+#define Q1_ANGLE_PID_MAX        20
 
 uint8_t TRACK1;
 uint8_t TRACK2;
@@ -86,10 +92,68 @@ static int ScaleMotorCommand(int speed, int scale_percent)
     return (speed * scale_percent) / 100;
 }
 
+static int AnglePidIncremental(int target, int yaw)
+{
+    static int err_k = 0;
+    static int err_k_1 = 0;
+    static int err_k_2 = 0;
+    static float output = 0;
+    int err;
+    float delta_output;
+
+    err = target - yaw;
+    if (err > 180)
+    {
+        err -= 360;
+    }
+    else if (err < -180)
+    {
+        err += 360;
+    }
+
+    err_k_2 = err_k_1;
+    err_k_1 = err_k;
+    err_k = err;
+
+    delta_output = Q1_ANGLE_KP * (err_k - err_k_1)
+                 + Q1_ANGLE_KI * err_k
+                 + Q1_ANGLE_KD * (err_k - 2 * err_k_1 + err_k_2);
+    output += delta_output;
+
+    if (output > Q1_ANGLE_PID_MAX)
+    {
+        output = Q1_ANGLE_PID_MAX;
+    }
+    else if (output < -Q1_ANGLE_PID_MAX)
+    {
+        output = -Q1_ANGLE_PID_MAX;
+    }
+
+    return (int)output;
+}
+
 static void ApplyDrive(int left_speed, int right_speed)
 {
     left_speed = ScaleMotorCommand(left_speed, Q1_LEFT_MOTOR_SCALE);
     right_speed = ScaleMotorCommand(right_speed, Q1_RIGHT_MOTOR_SCALE);
+
+    if (left_speed > 0)
+    {
+        left_speed += Q1_LEFT_MOTOR_BIAS;
+    }
+    else if (left_speed < 0)
+    {
+        left_speed -= Q1_LEFT_MOTOR_BIAS;
+    }
+
+    if (right_speed > 0)
+    {
+        right_speed += Q1_RIGHT_MOTOR_BIAS;
+    }
+    else if (right_speed < 0)
+    {
+        right_speed -= Q1_RIGHT_MOTOR_BIAS;
+    }
 
     Limit(&left_speed, &right_speed);
 
@@ -119,6 +183,8 @@ static void ParkingAlert(void)
         buzzer_off();
         Delay_ms(150);
     }
+
+    LED1_ON();
 }
 
 int main(void)
@@ -201,7 +267,7 @@ int main(void)
             continue;
         }
 
-        angle_pid_out = pid_angle2(target_yaw, current_yaw);
+        angle_pid_out = AnglePidIncremental(target_yaw, current_yaw);
         left_speed = Q1_BASE_SPEED - angle_pid_out;
         right_speed = Q1_BASE_SPEED + angle_pid_out;
         ApplyDrive(left_speed, right_speed);
