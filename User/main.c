@@ -17,15 +17,18 @@
 
 #define Q1_BASE_SPEED           30
 #define Q1_START_IGNORE_TICKS   40
-#define Q1_LEFT_MOTOR_SCALE    160
-#define Q1_RIGHT_MOTOR_SCALE    95
-#define Q1_LEFT_MOTOR_BIAS       8
-#define Q1_RIGHT_MOTOR_BIAS     -2
-#define Q1_SLEW_STEP             2
-#define Q1_ANGLE_KP           0.35f
-#define Q1_ANGLE_KI           0.01f
-#define Q1_ANGLE_KD           0.60f
-#define Q1_ANGLE_PID_MAX        20
+#define Q1_LEFT_MOTOR_SCALE    130
+#define Q1_RIGHT_MOTOR_SCALE   100
+#define Q1_LEFT_MOTOR_BIAS       3
+#define Q1_RIGHT_MOTOR_BIAS      0
+#define Q1_SLEW_STEP             1
+#define Q1_ANGLE_KP           0.18f
+#define Q1_ANGLE_KI           0.00f
+#define Q1_ANGLE_KD           0.30f
+#define Q1_ANGLE_PID_MAX        12
+#define Q1_ANGLE_DEADBAND        2
+#define Q1_ANGLE_DECAY        0.70f
+#define Q1_ERR_FILTER_A       0.70f
 
 uint8_t TRACK1;
 uint8_t TRACK2;
@@ -37,6 +40,10 @@ float Pitch, Roll, Yaw;
 int ack = 0;
 static int g_left_cmd = 0;
 static int g_right_cmd = 0;
+static int g_angle_err_k_1 = 0;
+static int g_angle_err_k_2 = 0;
+static float g_angle_pid_out = 0;
+static float g_angle_err_filtered = 0;
 
 static int NormalizeYawTo360(float yaw)
 {
@@ -92,13 +99,18 @@ static int ScaleMotorCommand(int speed, int scale_percent)
     return (speed * scale_percent) / 100;
 }
 
+static void ResetAnglePid(void)
+{
+    g_angle_err_k_1 = 0;
+    g_angle_err_k_2 = 0;
+    g_angle_pid_out = 0;
+    g_angle_err_filtered = 0;
+}
+
 static int AnglePidIncremental(int target, int yaw)
 {
-    static int err_k = 0;
-    static int err_k_1 = 0;
-    static int err_k_2 = 0;
-    static float output = 0;
     int err;
+    int err_now;
     float delta_output;
 
     err = target - yaw;
@@ -111,25 +123,38 @@ static int AnglePidIncremental(int target, int yaw)
         err += 360;
     }
 
-    err_k_2 = err_k_1;
-    err_k_1 = err_k;
-    err_k = err;
+    g_angle_err_filtered = g_angle_err_filtered * Q1_ERR_FILTER_A
+                         + err * (1.0f - Q1_ERR_FILTER_A);
+    err_now = (int)g_angle_err_filtered;
 
-    delta_output = Q1_ANGLE_KP * (err_k - err_k_1)
-                 + Q1_ANGLE_KI * err_k
-                 + Q1_ANGLE_KD * (err_k - 2 * err_k_1 + err_k_2);
-    output += delta_output;
-
-    if (output > Q1_ANGLE_PID_MAX)
+    if ((err_now < Q1_ANGLE_DEADBAND) && (err_now > -Q1_ANGLE_DEADBAND))
     {
-        output = Q1_ANGLE_PID_MAX;
-    }
-    else if (output < -Q1_ANGLE_PID_MAX)
-    {
-        output = -Q1_ANGLE_PID_MAX;
+        err_now = 0;
     }
 
-    return (int)output;
+    delta_output = Q1_ANGLE_KP * (err_now - g_angle_err_k_1)
+                 + Q1_ANGLE_KI * err_now
+                 + Q1_ANGLE_KD * (err_now - 2 * g_angle_err_k_1 + g_angle_err_k_2);
+    g_angle_pid_out += delta_output;
+
+    if (err_now == 0)
+    {
+        g_angle_pid_out *= Q1_ANGLE_DECAY;
+    }
+
+    if (g_angle_pid_out > Q1_ANGLE_PID_MAX)
+    {
+        g_angle_pid_out = Q1_ANGLE_PID_MAX;
+    }
+    else if (g_angle_pid_out < -Q1_ANGLE_PID_MAX)
+    {
+        g_angle_pid_out = -Q1_ANGLE_PID_MAX;
+    }
+
+    g_angle_err_k_2 = g_angle_err_k_1;
+    g_angle_err_k_1 = err_now;
+
+    return (int)g_angle_pid_out;
 }
 
 static void ApplyDrive(int left_speed, int right_speed)
@@ -218,6 +243,7 @@ int main(void)
         Delay_ms(10);
     }
 
+    ResetAnglePid();
     finished = 0;
     ignore_line_ticks = Q1_START_IGNORE_TICKS;
 
@@ -249,6 +275,7 @@ int main(void)
 
         if (finished)
         {
+            ResetAnglePid();
             StopDrive();
             Delay_ms(10);
             continue;
@@ -260,6 +287,7 @@ int main(void)
         }
         else if (infrared_state != 0)
         {
+            ResetAnglePid();
             StopDrive();
             finished = 1;
             ParkingAlert();
